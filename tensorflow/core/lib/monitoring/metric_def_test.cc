@@ -22,16 +22,16 @@ namespace monitoring {
 namespace {
 
 TEST(MetricDefTest, Simple) {
-  const MetricDef<MetricKind::CUMULATIVE, int64, 0> metric_def0(
+  const MetricDef<MetricKind::kCumulative, int64, 0> metric_def0(
       "/tensorflow/metric0", "An example metric with no labels.");
-  const MetricDef<MetricKind::GAUGE, double, 1> metric_def1(
+  const MetricDef<MetricKind::kGauge, HistogramProto, 1> metric_def1(
       "/tensorflow/metric1", "An example metric with one label.", "LabelName");
 
   EXPECT_EQ("/tensorflow/metric0", metric_def0.name());
   EXPECT_EQ("/tensorflow/metric1", metric_def1.name());
 
-  EXPECT_EQ(MetricKind::CUMULATIVE, metric_def0.kind());
-  EXPECT_EQ(MetricKind::GAUGE, metric_def1.kind());
+  EXPECT_EQ(MetricKind::kCumulative, metric_def0.kind());
+  EXPECT_EQ(MetricKind::kGauge, metric_def1.kind());
 
   EXPECT_EQ("An example metric with no labels.", metric_def0.description());
   EXPECT_EQ("An example metric with one label.", metric_def1.description());
@@ -39,6 +39,24 @@ TEST(MetricDefTest, Simple) {
   EXPECT_EQ(0, metric_def0.label_descriptions().size());
   ASSERT_EQ(1, metric_def1.label_descriptions().size());
   EXPECT_EQ("LabelName", metric_def1.label_descriptions()[0]);
+}
+
+TEST(MetricDefTest, StringsPersist) {
+  // Ensure string attributes of the metric are copied into the metric
+  string name = "/tensorflow/metric0";
+  string description = "test description";
+  string label_description = "test label description";
+  const MetricDef<MetricKind::kCumulative, int64, 1> metric_def(
+      name, description, label_description);
+
+  // Mutate the strings
+  name[4] = 'A';
+  description[4] = 'B';
+  label_description[4] = 'C';
+
+  EXPECT_NE(name, metric_def.name());
+  EXPECT_NE(description, metric_def.description());
+  EXPECT_NE(label_description, metric_def.label_descriptions()[0]);
 }
 
 }  // namespace

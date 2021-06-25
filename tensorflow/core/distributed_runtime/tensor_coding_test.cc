@@ -15,24 +15,44 @@ limitations under the License.
 
 #include "tensorflow/core/distributed_runtime/tensor_coding.h"
 
+#include "tensorflow/core/framework/device_attributes.pb.h"
+#include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/lib/strings/strcat.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/test_benchmark.h"
 #include "tensorflow/core/protobuf/worker.pb.h"
+#include "tensorflow/core/public/session_options.h"
 
 namespace tensorflow {
+
+class DummyDevice : public DeviceBase {
+ public:
+  explicit DummyDevice(Env* env) : DeviceBase(env) {
+    attr_.set_device_type("CPU");
+  }
+
+  const DeviceAttributes& attributes() const override { return attr_; }
+
+  Allocator* GetAllocator(AllocatorAttributes attr) override {
+    return cpu_allocator();
+  }
+
+ private:
+  DeviceAttributes attr_;
+};
 
 class StringSource : public TensorResponse::Source {
  public:
   explicit StringSource(const string* s, int block_size)
       : s_(s), stream_(nullptr), block_size_(block_size) {}
-  virtual ~StringSource() { DeleteStream(); }
+  ~StringSource() override { DeleteStream(); }
 
-  protobuf::io::ZeroCopyInputStream* contents() {
+  protobuf::io::ZeroCopyInputStream* contents() override {
     DeleteStream();
     stream_ = new (&space_)
         protobuf::io::ArrayInputStream(s_->data(), s_->size(), block_size_);
@@ -68,7 +88,9 @@ class TensorResponseTest : public ::testing::Test {
 
     StringSource source(&encoded, 1024);
 
-    TensorResponse response(cpu_allocator());
+    TensorResponse response;
+    DummyDevice cpu_device(Env::Default());
+    response.InitAlloc(&cpu_device, AllocatorAttributes());
     for (int i = 0; i < 2; i++) {  // Twice so we exercise reuse of "response"
       Status s = response.ParseFrom(&source);
       EXPECT_TRUE(s.ok());
@@ -98,12 +120,12 @@ class TensorResponseTest : public ::testing::Test {
     }
   }
   void DoTestForStrings(DataType dt) {
-    gtl::InlinedVector<string, 4> v;
+    gtl::InlinedVector<tstring, 4> v;
     LOG(ERROR) << "DT: string";
     for (int elems = 0; elems <= 10000; elems++) {
       if (elems < 100 || (elems % 1000 == 0)) {
         Tensor a(dt, TensorShape({1, static_cast<int64>(v.size())}));
-        test::FillValues<string>(&a, v);
+        test::FillValues<tstring>(&a, v);
         Validate(a, (elems == 0), true);
       }
       v.push_back(strings::StrCat("This is string ", elems));
@@ -151,35 +173,36 @@ string MakeFloatTensorTestCase(int num_elems) {
   return encoded;
 }
 
-static void BM_TensorResponse(int iters, int arg) {
-  testing::StopTiming();
+static void BM_TensorResponse(::testing::benchmark::State& state) {
+  const int arg = state.range(0);
+
   string encoded = MakeFloatTensorTestCase(arg);
-  testing::StartTiming();
-  while (--iters > 0) {
-    TensorResponse response(cpu_allocator());
+  DummyDevice cpu_device(Env::Default());
+  size_t bytes = 0;
+  for (auto i : state) {
+    TensorResponse response;
+    response.InitAlloc(&cpu_device, AllocatorAttributes());
     StringSource source(&encoded, -1);
     Status s = response.ParseFrom(&source);
-    if (iters == 1) {
-      testing::SetLabel(
-          strings::StrCat("Bytes: ", response.tensor().TotalBytes()));
-    }
+    bytes = response.tensor().TotalBytes();
   }
+  state.SetLabel(strings::StrCat("Bytes: ", bytes));
 }
 BENCHMARK(BM_TensorResponse)->Arg(0)->Arg(1000)->Arg(100000);
 
-static void BM_TensorViaTensorProto(int iters, int arg) {
-  testing::StopTiming();
-  string encoded = MakeFloatTensorTestCase(arg);
-  testing::StartTiming();
-  while (--iters > 0) {
+static void BM_TensorViaTensorProto(::testing::benchmark::State& state) {
+  const int arg = state.range(0);
+
+  std::string encoded = MakeFloatTensorTestCase(arg);
+  size_t bytes = 0;
+  for (auto s : state) {
     RecvTensorResponse r;
     r.ParseFromString(encoded);
     Tensor t;
     CHECK(t.FromProto(r.tensor()));
-    if (iters == 1) {
-      testing::SetLabel(strings::StrCat("Bytes: ", t.TotalBytes()));
-    }
+    bytes = t.TotalBytes();
   }
+  state.SetLabel(strings::StrCat("Bytes: ", bytes));
 }
 BENCHMARK(BM_TensorViaTensorProto)->Arg(0)->Arg(1000)->Arg(100000);
 

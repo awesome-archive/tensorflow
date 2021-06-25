@@ -1,4 +1,4 @@
-/* Copyright 2015 Google Inc. All Rights Reserved.
+/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/kernel_benchmark_testlib.h"
 #include "tensorflow/core/framework/allocator.h"
-#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/graph/node_builder.h"
@@ -30,6 +30,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/test_benchmark.h"
+#include "tensorflow/core/util/strided_slice_op.h"
 
 namespace tensorflow {
 namespace {
@@ -37,8 +38,8 @@ namespace {
 // For the benchmark, we set up two 2-dimensional tensors, each kDim1 x 'dim'
 // in size, and concat them together along "concat_dimension"
 template <typename T>
-static void SliceHelper(int iters, int size) {
-  testing::StopTiming();
+static void SliceHelper(::testing::benchmark::State& state) {
+  const int size = state.range(0);
   Graph* g = new Graph(OpRegistry::Global());
   DataType dt = DataTypeToEnum<T>::v();
   int kDim = 100;
@@ -69,23 +70,57 @@ static void SliceHelper(int iters, int size) {
                   .Attr("T", dt)
                   .Finalize(g, &node));
 
-  testing::BytesProcessed(static_cast<int64>(iters) * kDim * size * sizeof(T));
-  testing::StartTiming();
-  test::Benchmark("cpu", g).Run(iters);
-  testing::UseRealTime();
+  test::Benchmark("cpu", g, /*old_benchmark_api*/ false).Run(state);
+  state.SetBytesProcessed(static_cast<int64>(state.iterations()) * kDim * size *
+                          sizeof(T));
 }
 
-static void BM_SliceFloat(int iters, int dim2) {
-  SliceHelper<float>(iters, dim2);
+void BM_SliceFloat(::testing::benchmark::State& state) {
+  SliceHelper<float>(state);
 }
 
-BENCHMARK(BM_SliceFloat)->Arg(100)->Arg(1000)->Arg(10000);
+BENCHMARK(BM_SliceFloat)->UseRealTime()->Arg(100)->Arg(1000)->Arg(10000);
 
-static void BM_SliceBFloat16(int iters, int dim2) {
-  SliceHelper<bfloat16>(iters, dim2);
+void BM_SliceComplex64(::testing::benchmark::State& state) {
+  SliceHelper<std::complex<float>>(state);
 }
 
-BENCHMARK(BM_SliceBFloat16)->Arg(100)->Arg(1000)->Arg(10000);
+BENCHMARK(BM_SliceComplex64)->UseRealTime()->Arg(100)->Arg(1000)->Arg(10000);
+
+void BM_SliceBFloat16(::testing::benchmark::State& state) {
+  SliceHelper<bfloat16>(state);
+}
+
+BENCHMARK(BM_SliceBFloat16)->UseRealTime()->Arg(100)->Arg(1000)->Arg(10000);
+
+void BM_ValidateStridedSliceOp(::testing::benchmark::State& state) {
+  int kDim = 100;
+  int kMaxSize = 15000;
+  int size = 100;
+  Tensor begin = test::AsTensor<int32>({10, 10});
+  Tensor end = test::AsTensor<int32>({10 + kDim, 10 + size});
+  Tensor strides = test::AsTensor<int32>({1, 1});
+  TensorShape input_shape({2 * kDim, kMaxSize});
+
+  for (auto s : state) {
+    TensorShape processing_shape, final_shape;
+    bool is_identity = true, slice_dim0 = true, is_simple_slice = true;
+    gtl::InlinedVector<int64, 4> begin_out, end_out, strides_out;
+    const int32 begin_mask = 0;
+    const int32 end_mask = 0;
+    const int32 ellipsis_mask = 0;
+    const int32 new_axis_mask = 0;
+    const int32 shrink_axis_mask = 0;
+
+    TF_CHECK_OK(ValidateStridedSliceOp(
+        &begin, &end, strides, input_shape, begin_mask, end_mask, ellipsis_mask,
+        new_axis_mask, shrink_axis_mask, &processing_shape, &final_shape,
+        &is_identity, &is_simple_slice, &slice_dim0, &begin_out, &end_out,
+        &strides_out));
+  }
+}
+
+BENCHMARK(BM_ValidateStridedSliceOp);
 
 }  // namespace
 }  // namespace tensorflow

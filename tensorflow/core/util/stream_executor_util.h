@@ -17,6 +17,8 @@ limitations under the License.
 #define TENSORFLOW_CORE_UTIL_STREAM_EXECUTOR_UTIL_H_
 
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/stream_executor.h"
 
 namespace tensorflow {
@@ -28,10 +30,9 @@ class StreamExecutorUtil {
   // Map a Tensor as a DeviceMemory object wrapping the given typed
   // buffer.
   template <typename T>
-  static perftools::gputools::DeviceMemory<T> AsDeviceMemory(const Tensor& t) {
+  static se::DeviceMemory<T> AsDeviceMemory(const Tensor& t) {
     T* ptr = reinterpret_cast<T*>(const_cast<char*>(t.tensor_data().data()));
-    return perftools::gputools::DeviceMemory<T>(
-        perftools::gputools::DeviceMemoryBase(ptr, t.TotalBytes()));
+    return se::DeviceMemory<T>(se::DeviceMemoryBase(ptr, t.TotalBytes()));
   }
 };
 

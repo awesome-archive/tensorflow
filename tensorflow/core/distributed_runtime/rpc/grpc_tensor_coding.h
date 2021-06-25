@@ -16,14 +16,15 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_RPC_GRPC_TENSOR_CODING_H_
 #define TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_RPC_GRPC_TENSOR_CODING_H_
 
-namespace grpc {
-class ByteBuffer;
-}  // namespace grpc
+#include "grpcpp/impl/codegen/byte_buffer.h"
 
 namespace tensorflow {
 class Tensor;
 class RecvTensorResponse;
 
+// TODO(jeff,sanjay): this should not be grpc specific.  Instead of
+// grpc::ByteBuffer*, it should accept an object of an interface type
+// to which owned byte-arrays can be added.
 namespace grpc {
 
 // Encode a RecvTensorResponse protocol buffer into a byte buffer in a
@@ -45,7 +46,7 @@ void EncodeRecvTensorResponseToByteBuffer(const RecvTensorResponse& proto,
 // "val" holds the tensor value to be encoded.
 //
 // Discards original contents of *result.
-void EncodeTensorToByteBuffer(bool is_dead, const Tensor& val,
+void EncodeTensorToByteBuffer(bool is_dead, const Tensor& val, bool require_ack,
                               ::grpc::ByteBuffer* result);
 
 }  // namespace grpc
