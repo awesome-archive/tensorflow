@@ -16,42 +16,22 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_PLATFORM_FINGERPRINT_H_
 #define TENSORFLOW_CORE_PLATFORM_FINGERPRINT_H_
 
+#include "tensorflow/core/platform/stringpiece.h"
 #include "tensorflow/core/platform/types.h"
+#include "tsl/platform/fingerprint.h"
 
 namespace tensorflow {
 
-struct Fprint128 {
-  uint64 low64;
-  uint64 high64;
-};
+using Fprint128 = tsl::Fprint128;
+using Fprint128Hasher = tsl::Fprint128Hasher;
 
-inline bool operator==(const Fprint128& lhs, const Fprint128& rhs) {
-  return lhs.low64 == rhs.low64 && lhs.high64 == rhs.high64;
-}
-
-struct Fprint128Hasher {
-  size_t operator()(const Fprint128& v) const {
-    // Low64 should be sufficiently mixed to allow use of it as a Hash.
-    return static_cast<size_t>(v.low64);
-  }
-};
-
-// TODO(sibyl-Mooth6ku): Change these to accept StringPiece (or make them templated
-// on any kind of byte array?).
-
-// This is a portable fingerprint interface for strings that will never change.
-// However, it is not suitable for cryptography.
-uint64 Fingerprint64(const string& s);
-
-// 128-bit variant of Fingerprint64 above (same properties and caveats apply).
-Fprint128 Fingerprint128(const string& s);
+// NOLINTBEGIN(misc-unused-using-decls)
+using tsl::Fingerprint128;
+using tsl::Fingerprint32;
+using tsl::Fingerprint64;
+using tsl::FingerprintCat64;
+// NOLINTEND(misc-unused-using-decls)
 
 }  // namespace tensorflow
-
-#if defined(PLATFORM_GOOGLE)
-#include "tensorflow/core/platform/google/fingerprint.h"
-#else
-#include "tensorflow/core/platform/default/fingerprint.h"
-#endif
 
 #endif  // TENSORFLOW_CORE_PLATFORM_FINGERPRINT_H_

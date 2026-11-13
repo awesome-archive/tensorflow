@@ -15,7 +15,12 @@ limitations under the License.
 
 #include "tensorflow/core/framework/memory_types.h"
 
+#include <utility>
+
+#include "tensorflow/compiler/jit/defs.h"
+#include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/kernel_def.pb.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/types.h"
@@ -38,7 +43,7 @@ int GetTotal(const NameRangeMap& name_map) {
 // to DEVICE_MEMORY except those args in host_memory_args.  Removes
 // elements of host_memory_args that were used.
 void MemoryTypesHelper(const NameRangeMap& name_map,
-                       std::vector<string>* host_memory_args,
+                       std::vector<std::string>* host_memory_args,
                        MemoryTypeVector* memory_types) {
   // Update args that have been marked as in "HOST_MEMORY".
   size_t keep = 0;
@@ -57,47 +62,46 @@ void MemoryTypesHelper(const NameRangeMap& name_map,
   host_memory_args->resize(keep);
 }
 
-MemoryType MTypeFromDType(const DataType dtype) {
-  return (dtype == DT_INT32) ? HOST_MEMORY : DEVICE_MEMORY;
-}
-
-// Initialize the default memory types for type list arguments from the data
-// types. (The default can be overridden by an explicit HostMemory()
-// declaration.)
-Status SetTypeListMTypesFromDTypes(
-    const NameRangeMap& name_ranges,
-    const protobuf::RepeatedPtrField<OpDef::ArgDef>& args,
-    const DataTypeVector& dtypes, MemoryTypeVector* mtypes) {
-  for (const auto& a : args) {
-    if (!a.type_list_attr().empty()) {
-      auto it = name_ranges.find(a.name());
-      if (it == name_ranges.end()) {
-        return errors::InvalidArgument("Name range for argument ", a.name(),
-                                       " not found.");
-      }
-
-      for (int i = it->second.first; i < it->second.second; ++i) {
-        (*mtypes)[i] = MTypeFromDType(dtypes[i]);
-      }
-    }
-  }
-  return Status::OK();
+bool IsFunctionCallOp(const std::string& op_type) {
+  return op_type == "SymbolicGradient" || op_type == "PartitionedCall" ||
+         op_type == "StatefulPartitionedCall" || op_type == "While" ||
+         op_type == "StatelessWhile";
 }
 
 }  // namespace
 
-Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
-                          DeviceType device_type, const NodeDef& ndef,
-                          MemoryTypeVector* inp_mtypes,
-                          MemoryTypeVector* out_mtypes) {
+MemoryType MTypeFromDType(const DataType dtype) {
+  return (dtype == DT_INT32 || DataTypeAlwaysOnHost(dtype)) ? HOST_MEMORY
+                                                            : DEVICE_MEMORY;
+}
+
+MemoryType MTypeFromDTypeIntsOnDevice(const DataType dtype) {
+  return DataTypeAlwaysOnHost(dtype) ? HOST_MEMORY : DEVICE_MEMORY;
+}
+
+absl::Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
+                                const DeviceType& device_type,
+                                const NodeDef& ndef,
+                                MemoryTypeVector* inp_mtypes,
+                                MemoryTypeVector* out_mtypes) {
+  return MemoryTypesForNode(op_registry, device_type, ndef, inp_mtypes,
+                            out_mtypes, nullptr);
+}
+
+absl::Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
+                                const DeviceType& device_type,
+                                const NodeDef& ndef,
+                                MemoryTypeVector* inp_mtypes,
+                                MemoryTypeVector* out_mtypes,
+                                const KernelRegistry* registry) {
   // Look up the Op registered for this op name.
   const OpDef* op_def;
   TF_RETURN_IF_ERROR(op_registry->LookUpOpDef(ndef.op(), &op_def));
 
   // Look up the Kernel registered for this node def.
   const KernelDef* kdef = nullptr;
-  Status status =
-      FindKernelDef(device_type, ndef, &kdef, nullptr /* kernel_class_name */);
+  absl::Status status = FindKernelDef(
+      device_type, ndef, &kdef, nullptr /* kernel_class_name */, registry);
 
   DataTypeVector inp_dtypes;
   DataTypeVector out_dtypes;
@@ -107,44 +111,79 @@ Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
   inp_mtypes->clear();
   out_mtypes->clear();
 
-  if (!status.ok()) {
-    // When there is no kernel def for this op, we can only best-effort derive
-    // the memory type from the data type.  For now, we assume int32 is always
-    // on host memory and other types are always on device memory. We should
-    // do type inference over function body to derive the correct
-    // input/output memory types.
-    for (const auto& t : inp_dtypes) inp_mtypes->push_back(MTypeFromDType(t));
-    for (const auto& t : out_dtypes) out_mtypes->push_back(MTypeFromDType(t));
-    return Status::OK();
+  bool has_xla_compile = [&] {
+    const auto& it = ndef.attr().find(kXlaMustCompileAttr);
+    return it != ndef.attr().end() && it->second.b();
+  }();
+
+  bool has_kernel_def = status.ok() && !IsFunctionCallOp(ndef.op());
+  auto host_memory_required = [&](const DataType& dt) {
+    bool int32_on_device =
+        has_kernel_def || device_type.type_string() == "TPU" || has_xla_compile;
+    return DataTypeAlwaysOnHost(dt) || (dt == DT_INT32 && !int32_on_device);
+  };
+
+  if (has_kernel_def) {
+    // Gets the input/output names and their corresponding endpoint ranges.
+    NameRangeMap inp_names;
+    NameRangeMap out_names;
+    TF_RETURN_IF_ERROR(
+        NameRangesForNode(ndef, *op_def, &inp_names, &out_names));
+
+    // Now that we know the size, fill with the default 'DEVICE_MEMORY'.
+    inp_mtypes->resize(GetTotal(inp_names), DEVICE_MEMORY);
+    out_mtypes->resize(GetTotal(out_names), DEVICE_MEMORY);
+
+    // Fills in host memory types based on the kernel def.
+    const auto& from_proto = kdef->host_memory_arg();
+    std::vector<std::string> host_memory_args(from_proto.begin(),
+                                              from_proto.end());
+    MemoryTypesHelper(inp_names, &host_memory_args, inp_mtypes);
+    MemoryTypesHelper(out_names, &host_memory_args, out_mtypes);
+    if (!host_memory_args.empty()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "HostMemory args '", absl::StrJoin(host_memory_args, "', '"),
+          "' not found in OpDef: ", SummarizeOpDef(*op_def)));
+    }
+  } else {
+    // Set all the datatype to DEVICE_MEMORY by default, later on change it to
+    // HOST_MEMORY where it is required by the datatype.
+    inp_mtypes->resize(inp_dtypes.size(), DEVICE_MEMORY);
+    out_mtypes->resize(out_dtypes.size(), DEVICE_MEMORY);
+  }
+  CHECK_LE(inp_mtypes->size(), inp_dtypes.size());
+  CHECK_LE(out_mtypes->size(), out_dtypes.size());
+
+  // Mark e.g. all resource and string types as host memory.
+  for (int i = 0; i < inp_mtypes->size(); ++i) {
+    if (host_memory_required(inp_dtypes[i])) {
+      (*inp_mtypes)[i] = HOST_MEMORY;
+    }
+  }
+  for (int i = 0; i < out_mtypes->size(); ++i) {
+    if (host_memory_required(out_dtypes[i])) {
+      (*out_mtypes)[i] = HOST_MEMORY;
+    }
   }
 
-  // Gets the input/output names and their corresponding endpoint ranges.
-  NameRangeMap inp_names;
-  NameRangeMap out_names;
-  TF_RETURN_IF_ERROR(NameRangesForNode(ndef, *op_def, &inp_names, &out_names));
-
-  // Now that we know the size, fill with the default 'DEVICE_MEMORY'.
-  inp_mtypes->resize(GetTotal(inp_names), DEVICE_MEMORY);
-  out_mtypes->resize(GetTotal(out_names), DEVICE_MEMORY);
-
-  // For type list arguments, mark int32 arguments as host memory.
-  TF_RETURN_IF_ERROR(SetTypeListMTypesFromDTypes(inp_names, op_def->input_arg(),
-                                                 inp_dtypes, inp_mtypes));
-  TF_RETURN_IF_ERROR(SetTypeListMTypesFromDTypes(
-      out_names, op_def->output_arg(), out_dtypes, out_mtypes));
-
-  // Fills in host memory types based on the kernel def.
-  const auto& from_proto = kdef->host_memory_arg();
-  std::vector<string> host_memory_args(from_proto.begin(), from_proto.end());
-  MemoryTypesHelper(inp_names, &host_memory_args, inp_mtypes);
-  MemoryTypesHelper(out_names, &host_memory_args, out_mtypes);
-  if (!host_memory_args.empty()) {
-    return errors::InvalidArgument(
-        "HostMemory args '", str_util::Join(host_memory_args, "', '"),
-        "' not found in OpDef: ", SummarizeOpDef(*op_def));
+  std::vector<int32_t> hostmem_attr;
+  if (TryGetNodeAttr(ndef, "_input_hostmem", &hostmem_attr)) {
+    for (int32_t i : hostmem_attr) {
+      if (0 <= i && i < inp_mtypes->size()) {
+        (*inp_mtypes)[i] = HOST_MEMORY;
+      }
+    }
+  }
+  hostmem_attr.clear();
+  if (TryGetNodeAttr(ndef, "_output_hostmem", &hostmem_attr)) {
+    for (int32_t i : hostmem_attr) {
+      if (0 <= i && i < out_mtypes->size()) {
+        (*out_mtypes)[i] = HOST_MEMORY;
+      }
+    }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

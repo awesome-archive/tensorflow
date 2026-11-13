@@ -15,23 +15,38 @@
 
 """Gradients for operators defined in state_ops.py."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import ops
-from tensorflow.python.ops import state_ops
-
-ops.NoGradient("Assign")
 
 
-ops.NoGradient("AssignAdd")
+# TODO(b/31222613): These ops may be differentiable, and there may be
+# latent bugs here.
+ops.NotDifferentiable("Assign")
 
 
-ops.NoGradient("AssignSub")
+ops.NotDifferentiable("AssignAdd")
 
 
-ops.NoGradient("ScatterAdd")
+ops.NotDifferentiable("AssignSub")
 
 
-ops.NoGradient("ScatterSub")
+ops.NotDifferentiable("ScatterAdd")
+
+
+ops.NotDifferentiable("ScatterSub")
+
+
+ops.NotDifferentiable("ScatterMul")
+
+
+ops.NotDifferentiable("ScatterDiv")
+
+
+ops.NotDifferentiable("ScatterNdUpdate")
+
+ops.NotDifferentiable("ScatterNdAdd")
+
+ops.NotDifferentiable("ScatterNdSub")
+
+ops.NotDifferentiable("ScatterNdMul")
+
+ops.NotDifferentiable("ScatterNdDiv")
